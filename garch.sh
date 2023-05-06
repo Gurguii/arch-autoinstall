@@ -4,73 +4,30 @@
 
 # ACTUALLY UNUSED - I DON'T KNOW HOW TO PASS A COMMAND TO THIS :))
 function check(){
-  # If debug mode is enabled (disabled by default) errors will be printed, else errors and output will be 
-  if [ "$debug" ]; then 
-    "$1" 1>> stdout.logs 2>> stderr.logs 
+  if (( $debug )); then
+    bash -c "$1" | tee -a "$debugfile"
   else 
-    "$1" &>/dev/null
+    bash -c "$1" &>/dev/null 
   fi
-  # Check status code to see if the command failed and exiting is required
-  if [ "$?" -ne 0 ]; then 
-    echo -e "command "$1" failed\n"
-    exit 1 
+  if [[ $? -ne 0 ]]; then
+    printf "[!] Command '%s' failed, exiting ...\n" "$1"
   fi
 }
+
 # Make sure the configuration file is in the current directory, and if so, import it
 if [[ -e "garch.conf" ]]; then 
   source "garch.conf"
 else
-  echo -e "can't find config file, please make sure the 'garch.conf' file is in the current directory: "$(pwd)"\n"
+  printf "[!] Can't find config file\nplease make sure the 'garch.conf' file is in the current directory:'%s'\n" "$(pwd)"
   exit 1
 fi 
-
-# Check if target disk is already mounted
-if mount | grep -q "$disk"; then 
-  read -r -p "Target disk -"$disk"- is already mounted, umount and proceed? y/n " ans
-  if [[ "${ans,,}" == "n" || "${ans,,}" == "no" ]]; then
-    exit 0 
-  fi
-  umount -a
-  swapoff "$swap"
-fi
-
-# Ask for confirmation since disk wiping / partition erasing will be made
-read -r -p "This will erase signatures from existing disk and delete partitions, continue? " ans
-if [[ "${ans,,}" == "n" || "${ans,,}" == "no" ]]; then 
-  exit 0 
-fi
 
 # - Load keyboard layout
 loadkeys "$keyboard_layout"
 
-# Delete existing partitions 
-echo -e "d\n1\nd\n2\nd\nw" | fdisk "$disk"
-
-# Wipe existing signatures and partition table entries
-wipefs --force --all "$disk"
-partprobe "$disk"
-
-# - Create disk partitions
-# First partition (boot)
-echo -e "n\np\n1\n\n+1G\nw" | fdisk "$disk"
-# Second partition (swap)
-echo -e "n\np\n2\n\n+8G\nw" | fdisk "$disk"
-# Third partition (rootfs)
-echo -e "n\np\n3\n\n\nw" | fdisk "$disk"
-
-# - Format disk partitions 
-# Boot partition 
-mkfs.vfat -F 32 "$boot"
-# Rootfs partition
-mkfs.ext4 "$rootfs"
-# Swap partition
-mkswap "$swap"
-
-# - Mount partitioned disk
-mount "$rootfs" /mnt
-mkdir -p /mnt/boot/efi
-mount "$boot" /mnt/boot/efi 
-swapon "$swap"
+# DISK CONFIGURATION
+# 'disk.sh' performs everything related to disks
+source disk.sh
 
 # - Install stuff in the new system
 
