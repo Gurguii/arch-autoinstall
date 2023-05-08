@@ -1,0 +1,2 @@
+- Work on a useful disk layout system, or at least add few basic layouts (e.g. root-swap-boot | boot-swap-root) 
+- Also properly mount/umount disk, add more checks for every action and add the check() function which checks the status code '$?' of the last executed command to see if it succeeded or not.
