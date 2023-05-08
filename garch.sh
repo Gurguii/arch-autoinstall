@@ -38,14 +38,15 @@ pacstrap /mnt base linux linux-firmware grub efibootmgr networkmanager sudo
 # Extra stuff 
 if (( ${#basic_extra} > 0 )); then
   echo "basic extra is not empty: $basic_extra"
-  sleep 10
-  pacstrap /mnt "$basic_extra"
+  pacstrap /mnt $basic_extra
 else 
   echo "basic extra is empty: $basic_extra"
 fi
-sleep 10
-# - Generate fstab
 
+# GRAPHICAL ENVIRONMENT
+source graphicalenvs.sh
+
+# - Generate new system's fstab
 genfstab -U /mnt > /mnt/etc/fstab
 
 # - Do some configuration in the new system
@@ -63,6 +64,8 @@ echo -e "\$newpasswd\n\$newpasswd" | passwd
 
 # Create sudoer
 useradd -m "$user"
+
+$(if (( $prompt4password )); then read -p -s "sudoer password: " pass; echo "pass=$pass"; fi)
 echo -e "$pass\n$pass" | passwd "$user" 
 echo -e "# Gurgui automated script\n"$user" ALL=(ALL : ALL) ALL" >> /etc/sudoers
 # Set hostname
@@ -73,7 +76,7 @@ echo "$keyboard_layout" > /etc/vconsole.conf
 
 # Enable services 
 systemctl enable -y NetworkManager 
-systemctl enable -y gdm
+systemctl enable -y "$displayManager"
 
 # Install the bootloader
 grub-install "$disk"
@@ -82,15 +85,17 @@ grub-install "$disk"
 grub-mkconfig -o /boot/grub/grub.cfg 
 EOF
 
+# Give 'garch_autoinstall.sh' script execute permissions and execute it
 arch-chroot /mnt /bin/bash -c 'chmod +x /root/garch_autoinstall.sh'
+arch-chroot /mnt /bin/bash -c '/root/garch_autoinstall.sh'
 
-# - exit, umount and hopefully enjoy our new system 
-arch-chroot /mnt /bin/bash -c 'bash /root/garch_autoinstall.sh'
+# Delete it after being used
 rm /mnt/root/garch_autoinstall.sh
 
 read -r -p "Installation done, reboot is required to enjoy the new system, umount and reboot now? y/n " res
 if [[ ${res,,} == "y" || ${res,,} == "yes" ]]
 then
-  umount -a
+  umount "$disk*"
+  swapoff "$disk"2
   reboot
 fi

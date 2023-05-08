@@ -4,7 +4,7 @@ function get_target_disk(){
   available_disks=($(lsblk -dn -o NAME | grep -v "loop\|ram\|sr"))
   n=0
   
-  printf "[+] Looking for empty disks in the system...\n"
+  printf "[+] Looking for disks in the system...\n"
   
   for disk in ${available_disks[@]}; do
       printf "%i: %s - size %s\n" "$n" "/dev/$disk" "$(lsblk -o SIZE /dev/$disk | grep -v 'SIZE' | head -1)" 
@@ -55,13 +55,19 @@ fi
 wipefs --force --all "$disk"
 partprobe "$disk"
 
+# 
+if [[ "${partitionScheme,,}" == "gpt" ]]; then 
+  echo -e "g\nn\n\n\n+1G\nt\n1\n83\nn\n\n\n+4G\nn\n\n\n\nw\n" | fdisk -c -n "$disk"
+elif [[ "${partitionScheme,,}" == "mbr" ]]; then 
+  echo -e "o\nn\n\n\n+1G\nt\n1\n83\nn\n\n\n+4G\nn\n\n\n\nw\n" | fdisk -c=dos -n "$disk"
+fi
 # - Create disk partitions B4G S4M R3G - 4 gigabytes boot, 4 megabytes swap, 3 gigabytes root (an idea for custom layouts)
-# First partition (boot)
-echo -e "n\np\n1\n\n+1G\nw" | fdisk "$disk"
-# Second partition (swap)
-echo -e "n\np\n2\n\n+8G\nw" | fdisk "$disk"
-# Third partition (rootfs)
-echo -e "n\np\n3\n\n\nw" | fdisk "$disk"
+## First partition (boot)
+#echo -e "n\np\n1\n\n+1G\nw" | fdisk "$disk"
+## Second partition (swap)
+#echo -e "n\np\n2\n\n+8G\nw" | fdisk "$disk"
+## Third partition (rootfs)
+#echo -e "n\np\n3\n\n\nw" | fdisk "$disk"
 
 partprobe "$disk"
 
