@@ -15,10 +15,11 @@ function check(){
 }
 
 # Make sure the configuration file is in the current directory, and if so, import it
+# 'garch.conf' holds configuration variables
 if [[ -e "garch.conf" ]]; then 
   source "garch.conf"
 else
-  printf "[!] Can't find config file\nplease make sure the 'garch.conf' file is in the current directory:'%s'\n" "$(pwd)"
+  printf "[!] Can't find 'garch.conf'\nplease make sure it is located in the current directory:'%s'\n" "$(pwd)/garch.conf"
   exit 1
 fi 
 
@@ -27,7 +28,12 @@ loadkeys "$keyboard_layout"
 
 # DISK CONFIGURATION
 # 'disk.sh' performs everything related to disks
-source disk.sh
+if [[ -e "disk.sh" ]]; then 
+  source "disk.sh"
+else
+  printf "[!] Can't find 'disk.sh'\nplease make sure it is located in the current directory:'%s'\n" "$(pwd)/disk.sh"  
+  exit 1
+fi
 
 # - Install stuff in the new system
 

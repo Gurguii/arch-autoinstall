@@ -1,20 +1,92 @@
 #!/bin/bash
-
-function get_target_disk(){
-  available_disks=($(lsblk -dn -o NAME | grep -v "loop\|ram\|sr"))
+function gptDisk(){
+  for i in ${!diskLayout[@]}; do
+  	type="${diskLayout[i]:0:4}"
+  	size="${diskLayout[i]:4}"
+    printf "iterating through %s\n" "${diskLayout[i]}"
+  	sleep 3
+    case "${type,,}" in
+  		boot)
+        bootPartition="$disk""$((i++))"
+        if [[ $i -eq 0 ]]; then
+  			  fdiskCommand+="n\\n\\n\\n$size\\n"
+        else
+          fdiskCommand+="n\\n\\n\\$size\\n"
+        fi
+        ;;
+  		swap)
+        swapPartition="$disk""$((i++))"
+        if [[ $i -eq 0 ]]; then
+          fdiskCommand+="n\\n\\n\\n$size\\nt\\n19\\n"
+  			else
+          fdiskCommand+="n\\n\\n\\n$size\\nt\\n$((i++))\\n19\\n"
+        fi
+        ;;
+  		root)
+        rootPartition="$disk""$((i++))"
+        if [[ $i -eq 0 ]]; then
+  			  fdiskCommand+="n\\n\\n\\n$size\\nt\\n20\\n"
+        else
+          fdiskCommand+="n\\n\\n\\n$size\\nt\\n$((i++))\\n20\\n"
+        fi
+        ;;
+  		*)
+  			printf "Invalid partition scheme\n"
+  			exit 1
+  			;;
+  	esac
+  done
+}
+function mbrDisk(){
+  for i in ${!diskLayout[@]}; do
+    type="${diskLayout[i]:0:4}"
+    size="${diskLayout[i]:4}"
+    case "${type,,}" in
+      boot)
+        bootPartition="$disk""$((i++))"
+        if [[ $i -eq 0 ]]; then
+          fdiskCommand+="n\\np\\n\\n\\n$size\\n"
+        else
+          fdiskCommand+="n\\np\\n\\n\\n$size\\n"
+        fi
+        ;;
+      swap)
+        swapPartition="$disk""$((i++))"
+        if [[ $i -eq 0 ]]; then
+          fdiskCommand+="n\\np\\n\\n\\n$size\\nt\\n82\\n"
+        else
+          fdiskCommand+="n\\np\\n\\n\\n$size\\nt\\n$((i++))\\n82\\n"
+        fi
+        ;;
+      root)
+        rootPartition="$disk""$((i++))"
+        if [[ $i -eq 0 ]]; then
+          fdiskCommand+="n\\np\\n\\n\\n$size\\nt\\n83\\n"
+        else
+          fdiskCommand+="n\\np\\n\\n\\n$size\\nt\\n$((i++))\\n83\\n"
+        fi
+        ;;
+      *)
+        printf "Invalid partition layout '%s'\n" "$i"
+        exit 1
+    esac
+  done
+}
+function getTargetDisk(){
+  availableDisks=($(lsblk -dn -o NAME | grep -v "loop\|ram\|sr"))
   n=0
   
   printf "[+] Looking for disks in the system...\n"
   
-  for disk in ${available_disks[@]}; do
+  for disk in ${availableDisks[@]}; do
       printf "%i: %s - size %s\n" "$n" "/dev/$disk" "$(lsblk -o SIZE /dev/$disk | grep -v 'SIZE' | head -1)" 
       ((++n))  
   done
   
   while true; do
     read -p "[?] Which disk to use? " ans
-    if [[ $ans =~ ^[0-9]$ ]] && (( ans < ${#available_disks[@]} && ans >= 0 )); then
-      disk=${available_disks[ans]}  
+    if [[ $ans =~ ^[0-9]$ ]] && (( ans < ${#availableDisks[@]} && ans >= 0 )); then
+      disk=${availableDisks[ans]}  
       break
     else
       continue
@@ -24,8 +96,9 @@ function get_target_disk(){
   disk="/dev/$disk"
 }
 
+# If disk variable is empty (default), guide the user through disk choice
 if [[ -z "$disk" ]]; then
-  get_target_disk
+  getTargetDisk
 fi
 
 # Check if target disk is already mounted
@@ -47,40 +120,40 @@ if [[ "${ans,,}" == "n" || "${ans,,}" == "no" ]]; then
   exit 0 
 fi
 
-
-# Delete existing partitions 
-# echo -e "d\n1\nd\n2\nd\nw" | fdisk "$disk"
-
 # Wipe existing signatures and partition table entries
-wipefs --force --all "$disk"
+sgdisk -Z "$disk"
+fdiskCommand=""
+
+case "${partitionScheme,,}" in
+	gpt)
+		fdiskCommand+="g\\n"
+		gptDisk
+    ;;
+	mbr)
+		fdiskCommand+="o\\n"
+		mbrDisk
+    ;;
+	*)
+		printf "[!] Detected wrong partitioning scheme '%s'\n" "${partitionScheme,,}"
+		exit 1
+		;;
+esac
+
+fdiskCommand+="w"
+# Partition the disk 
+echo -e "$fdiskCommand" | fdisk "$disk"
 partprobe "$disk"
 
-# 
-if [[ "${partitionScheme,,}" == "gpt" ]]; then 
-  echo -e "g\nn\n\n\n+1G\nt\n1\n83\nn\n\n\n+4G\nn\n\n\n\nw\n" | fdisk -c -n "$disk"
-elif [[ "${partitionScheme,,}" == "mbr" ]]; then 
-  echo -e "o\nn\n\n\n+1G\nt\n1\n83\nn\n\n\n+4G\nn\n\n\n\nw\n" | fdisk -c=dos -n "$disk"
-fi
-# - Create disk partitions B4G S4M R3G - 4 gigabytes boot, 4 megabytes swap, 3 gigabytes root (an idea for custom layouts)
-## First partition (boot)
-#echo -e "n\np\n1\n\n+1G\nw" | fdisk "$disk"
-## Second partition (swap)
-#echo -e "n\np\n2\n\n+8G\nw" | fdisk "$disk"
-## Third partition (rootfs)
-#echo -e "n\np\n3\n\n\nw" | fdisk "$disk"
-
-partprobe "$disk"
-
-# - Format disk partitions 
+# - FORMAT DISK PARTITIONS
 # Boot partition 
-mkfs.vfat -F 32 "$disk"1
+mkfs.vfat -F 32 "$bootPartition"
 # Rootfs partition
-mkfs.ext4 "$disk"2
+mkfs.ext4 "$rootPartition"
 # Swap partition
-mkswap "$disk"3
+mkswap "$swapPartition"
 
-# - Mount partitioned disk
-mount "$disk"3 /mnt
+# - MOUNT PARTITIONED DISK
+mount "$rootPartition" /mnt
 mkdir -p /mnt/boot/efi
-mount "$disk"1 /mnt/boot/efi 
-swapon "$disk"2
+mount "$bootPartition" /mnt/boot/efi 
+swapon "$swapPartition"
