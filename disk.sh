@@ -75,7 +75,6 @@ function mbrDisk(){
 function getTargetDisk(){
   availableDisks=($(lsblk -dn -o NAME | grep -v "loop\|ram\|sr"))
   n=0
-  
   printf "[+] Looking for disks in the system...\n"
   
   for disk in ${availableDisks[@]}; do
