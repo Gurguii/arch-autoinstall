@@ -1,7 +1,6 @@
 #!/bin/bash 
 
 # + Variables
-
 argc=$#
 args=($@)
 
@@ -9,28 +8,6 @@ verbose=false
 
 keyboard_layout="es"
 timezone="UTC+0"
-
-mountpoint="/mnt"
-
-fdiskcmd=""
-
-
-# + New system
-DISK=""
-DISK_SIZE=0
-partitionScheme="gpt"
-partitionLayout="basic" # basic|advanced
-partitionBootSize="1048576" # 1G - sizes are in Kb
-partitionSwapSize="8388608" # 8G - sizes are in Kb
-
-hostname="arch1to"
-
-user="admin"
-pass=""
-
-enableGraphics=false
-graphicalEnvironment="lxqt"
-displayManager="sddm"
 
 declare -A graphEnvs
 graphEnvs['gnome']="gnome gdm" # also 'gnome-extra'
@@ -44,17 +21,81 @@ graphEnvs['enlightenment']="enlightenment lightdm" # also 'gdm'
 graphEnvs['budgie']="budgie-desktop lightdm"
 
 declare -A packageBundle
-# note: -> | linux base linux-firmware linux-headers grub efibootmgr networkmanager | <- packages will always be installed
+# note: -> | linux base linux-firmware linux-headers grub networkmanager efibootmgr | <- packages will always be installed
 packageBundle['minimal']=""
 packageBundle['gurgui']="base-devel net-tools nmap neovim ttf-firacode-nerd nodejs zip unzip p7zip wireshark-qt john hashcat subbrute sudo"
 packageBundle['devel']="base-devel perl ruby nodejs"
 
-packagesToInstall='base-devel net-tools nmap neovim ttf-firacode-nerd nodejs zip unzip p7zip wireshark-qt john hashcat'
+# + New system
+mountpoint="/mnt"
+mountcmd=()
+fdiskcmd=""
+DISK=""
+DISK_SIZE=0
+AVAILABLE=0
+BOOTSIZE=1048576 # 1GB
+SWAPSIZE=8388608 # 8GB
+ROOTSIZE=0
+HOMESIZE=0
+grubBoot=""
+
+partitionScheme="gpt"
+partitionLayout="basic" # basic(/) advanced(/:/home)  
+
+hostname="arch1to"
+
+user="admin"
+pass=""
+
+enableGraphics=false
+graphicalEnvironment=""
+displayManager=""
+
+packagesToInstall='linux base linux-firmware linux-headers grub networkmanager efibootmgr sudo'
 
 extraPackages=""
 # - Variables
 
 # + Functions
+
+function usage(){
+  cat << EOF 
+# Arch autoinstall script 
+# Author: Airán 'Gurgui' Gómez
+# Description: Script to automatise arch linux installation
+
+Usage: ./garch.sh [subopts]
+
+= Subopts =
+
+** general **
+-h | --help : display this message and exit
+-v | --verbose : be more verbose
+
+** host **
+-h | --hostname <hostname> : set hostname - default "arch1t0"
+
+** user **
+-u | --user <user> : set username for new system's sudoer - default: "admin"
+-p | --pass <pass> : set password for new system's sudoer - default: "" (will get prompted)
+
+** disk **
+-mnt    | --mountpoint <mountpoint> : set mountpoint - default "/mnt"
+-mbr    | --mbr : use mbr partitioning table - default "gpt"
+-gpt    | --gpt : use gpt partitioning table - default "gpt"
+-swap   | --swapsize <int>G|M|K|B : set swap partition size  
+-boot   | --bootsize <int>G|M|K|B : set boot partition size 
+-layout | --layout <basic|advanced> : set partition layout (splitted home or all in /)
+
+** packages **
+-bundle | --package-bundle <minimal|gurgui|devel> : bundle of tools to install - default 'gurgui'
+-extra  | --extra-packages <csv> : packages to install
+
+** graphics **
+-graphics | --graphics : install and enable graphics - default false
+EOF
+}
+
 #    + Graphical environment setup
 function setupGraphicalEnvironment(){
   if [[ -z "$graphicalEnvironment" || -z "$displayManager" ]]; then
@@ -94,33 +135,35 @@ function setupGraphicalEnvironment(){
 #    - Graphical environment setup
 
 #    + Disk functions
-function gptDisk(){
- local available="$DISK_SIZE"
+function fdiskCommandGPT(){
+ fdiskcmd+="g\\n" # Create GPT disklabel
+ fdiskcmd+="n\\n\\n\\n+""$BOOTSIZE""K\\nt\\nuefi\\n"     # Create boot partition
+ fdiskcmd+="n\\n\\n\\n+""$SWAPSIZE""K\\nt\\n2\\nswap\\n" # Create swap partition
 
- echo "before: $available"
- for kb in $partitionBootSize $partitionSwapSize; do
-  (( available -= "$kb" ))
- done
- echo "after: $available"
- fdiskcmd+="g\\n"; # Create GPT disklabel
- fdiskcmd+="n\\n\\n\\n+$partitionBootSize""K\\nt\\nuefi\\n" # Create boot partition
- fdiskcmd+="n\\n\\n\\n+$partitionSwapSize""K\\nt\\n2\\nswap\\n" # Create swap partition
- 
- if [ "$partitionLayout" == "basic" ]; then
+ if [ "${partitionLayout,,}" == "basic" ]; then
   fdiskcmd+="n\\n\\n\\n\\nt\\n3\\nlinux\\n" # Root partition
- elif [ "$partitionLayout" == "advanced" ]; then
-  local rootsize=$(( available / 100 * 40 ))  # root:40% home:60%
-  echo "$rootsize"
-  fdiskcmd+="n\\n\\n\\n+$rootsize""K\\nt\\n3\\n23\\n" # Root partition - Type code 23 = linux root (x86-64)
+ elif [ "${partitionLayout,,}" == "advanced" ]; then
+  fdiskcmd+="n\\n\\n\\n+""$rootsize""K\\nt\\n3\\n23\\n" # Root partition - Type code 23 = linux root (x86-64)
   fdiskcmd+="n\\n\\n\\n\\nt\\n4\\nlinux\\n"     # Home partition - Type code 42 = linux home
  else
-  printf "[!] invalid partition layout: '%s'\n" "$partitionLayout" && exit 1
+  printf "[!] Invalid partition layout: '%s'\n" "$partitionLayout" && exit 1
  fi
 
 }
 
-function mbrDisk(){
- echo "mbrDisk()"
+function fdiskCommandMBR(){
+  fdiskcmd="o\\n" # Create DOS (MBR) disklabel
+  fdiskcmd+="n\\n\\n\\n\\n+""$BOOTSIZE""K\\nt\\nlinux\\na\\n" # Create boot partition and mark as bootable
+  fdiskcmd+="n\\n\\n\\n\\n+""$SWAPSIZE""K\\nt\\n2\\nswap\\n"  # Create swap partition
+
+  if [ "${partitionLayout,,}" == "basic" ]; then
+    fdiskcmd+="n\\n\\n\\n\\n\\nt\\n3\\nlinux\\n"
+  elif [ "${partitionLayout,,}" == "advanced" ]; then
+    fdiskcmd+="n\\n\\n\\n\\n+""$rootsize""K\\nt\\n3\\nlinux\\n"
+    fdiskcmd+="n\\np\\n\\n\\nt\\n4\\nlinux\\n"
+  else
+    printf "[!] Invalid partition layout: '%s'\n" "$partitionLayout" && exit 1
+  fi
 }
 
 function getTargetDisk(){
@@ -144,17 +187,28 @@ function getTargetDisk(){
     fi
   done
 
-  if [ -z "$DISK" ]; then
-    exit 1
-  fi
+  [ -z "$DISK" ] && exit 1
 }
 
 function setupDisk(){
+
   if [[ -z "$DISK" ]]; then
     getTargetDisk
   fi
 
   DISK_SIZE=$(( $(lsblk -o SIZE -bdn "$DISK") / 1024 ))
+  AVAILABLE="$DISK_SIZE"
+
+  for kilobytes in $BOOTSIZE $SWAPSIZE; do
+    (( AVAILABLE -= "$kilobytes" ))
+  done
+  
+  if [ "${partitionLayout}" == "advanced" ]; then
+    ROOTSIZE=$(( AVAILABLE / 100 * 40 )) # root:40% home:60%
+    HOMESIZE=$(( AVAILABLE - ROOTSIZE ))
+  else
+    ROOTSIZE="$AVAILABLE"
+  fi
 
   # Check if target disk is mounted
   if mount | grep -q "$DISK"; then 
@@ -164,20 +218,34 @@ function setupDisk(){
   
   case "${partitionScheme,,}" in
     gpt)
-      gptDisk
+      fdiskCommandGPT
       ;;
     mbr)
-      mbrDisk
+      fdiskCommandMBR
       ;;
     *)
-      printf "[!] Detected wrong partitioning scheme '%s'\n" "${partitionScheme,,}"
-      exit 1
+      printf "[!] Detected wrong partitioning scheme '%s'\n" "${partitionScheme,,}" && exit 1
       ;;
   esac
 
   fdiskcmd+="w\\n"
   
-  echo "fdisk command: $fdiskcmd"
+  # TODO - print mountpoints information + partitions
+  local boot="$DISK"p1
+  local swap="$DISK"p2
+  local root="$DISK"p3
+  local home="$DISK"p4
+
+# TODO - Change table: PARTITION MOUNTPOINT SIZE
+  cat << EOF
+      == Disk layout ==
+TYPE          PATH            SIZE
+boot        $boot     $(( BOOTSIZE / 1024 )) mb
+swap        $swap     $(( SWAPSIZE / 1024 )) mb
+root        $root     $(( ROOTSIZE / 1024 )) mb
+EOF
+
+(( $HOMESIZE > 0 )) && printf "home        %s     %s mb\n" "$home" "$(( HOMESIZE / 1024))"
 
   # Ask for confirmation since disk wiping / partition erasing will be made
   read -r -p "-- WARNING - This will erase signatures from existing disk and delete partitions, continue? y/n: " ans
@@ -190,8 +258,49 @@ function setupDisk(){
   wipefs --force --all "$DISK"
   partprobe "$DISK"
 
-  exit 1
-}
+  # Partition the disk
+  echo -e "$fdiskcmd" | fdisk -w always -W always "$DISK" &>/dev/null
+
+  partprobe
+
+  # Create root and swap filesystems since they will be the same for both mbr | gpt 
+  mkfs.ext4 "$root" || printf "[!] failed creating ext4 fs on root partition '%s'\n" "$root" && exit 1
+  mkswap "$swap"    || printf "[!] failed creating swap fs on swap partition '%s'\n" "$swap" && exit 1
+
+  # Mount the disk
+  if [ "${partitionScheme,,}" == "mbr" ]; then
+    # Create appropiate boot fs
+    mkfs.ext2 "$boot" || printf "[!] failed creating ext2 fs on boot partition '%s'\n" "$boot" && exit 1
+    
+    mount "$root" "$mountpoint"
+    mkdir -p "$mountpoint/boot"
+    mount "$boot" "$mountpoint/boot"    
+
+    if [ "${partitionLayout}" == "advanced" ]; then
+      mkfs.ext4 "$home" || printf "[!] failed creating ext4 fs on home partition '%s'\n" "$home" && exit 1
+
+      mkdir -p "$mountpoint/home" 
+      mount "$home" "$mountpoint/home"
+    fi
+  elif [ "${partitionScheme,,}" == "gpt" ]; then
+    # Create appropiate boot fs
+    mkfs.vfat -F32 "$boot" || printf "[!] failed creating FAT32 fs on boot partition '%s'\n" "$boot" && exit 1
+
+    mount "$root" "$mountpoint"
+    mkdir -p "$mountpoint/boot/efi"
+    mount "$boot" "$mountpoint/boot/efi"
+
+    if [ "${partitionLayout,,}" == "advanced" ]; then
+      mkfs.ext4 "$home" || printf "[!] failed creating ext4 fs on home partition '%s'\n" "$home" && exit 1
+
+      mkdir -p "$mountpoint/home"
+      mount "$home" "$mountpoint/home"
+    fi
+  fi
+
+  # Enable swap
+  swapon "$swap"
+} 
 #    - Disk functions
 
 function __retrieve_size(){
@@ -200,10 +309,10 @@ function __retrieve_size(){
   unit="${1: -1}"
 
   case "${unit,,}" in
-    g ) printf -- "%i" "$(( $size * 1024 * 1024 ))" ;;
-    m ) printf -- "%i" "$(( $size * 1024  ))" ;;
-    k ) printf -- "%i" "$size" ;;
-    b ) printf -- "%i" "$(( $size / 1024 ))" ;;
+    g ) printf -- "%lu" "$(( $size * 1024 * 1024 ))" ;;
+    m ) printf -- "%lu" "$(( $size * 1024  ))" ;;
+    k ) printf -- "%lu" "$size" ;;
+    b ) printf -- "%lu" "$(( $size / 1024 ))" ;;
     * ) printf -- "-1"
   esac
 }
@@ -211,8 +320,8 @@ function __retrieve_size(){
 function parse(){
  for (( i = 0 ; i < $argc ; ++i )); do
   opt="${args[i],,}"
-  if [[ "$opt" == "-d" || "$opt" == "--debug" ]]; then
-    debug=true
+  if   [[ "$opt" == "-h" || "$opt" == "--help" ]]; then
+    usage && exit 0
   elif [[ "$opt" == "-v" || "$opt" == "--verbose" ]]; then
     verbose=true
   elif [[ "$opt" == "-disk" || "$opt" == "--disk" ]]; then
@@ -244,12 +353,12 @@ function parse(){
       umount "$mountpoint" || printf "can't umount" && exit 1
     fi
   elif [[ "$opt" == "-swap" || "$opt" == "--swapsize" ]]; then
-    partitionSwapSize=$(__retrieve_size "${args[++i]}")
-    (( $partitionSwapSize <= 0 )) &>/dev/null && printf "[!] ignoring invalid given swap size '%s'\n " "${args[++i]}" && exit 1
+    SWAPSIZE=$(__retrieve_size "${args[++i]}")
+    (( $SWAPSIZE <= 0 )) &>/dev/null && printf "[!] ignoring invalid given swap size '%s'\n " "${args[++i]}" && exit 1
     (( ++i ))
   elif [[ "$opt" == "-boot" || "$opt" == "--bootsize" ]]; then
-    partitionBootSize=$(__retrieve_size "${args[++i]}")
-    (( $partitionBootSize <= 0 )) &>/dev/null && printf "[!] ignoring invalid given boot size '%s'\n" "${args[++i]}" && exit 1 
+    BOOTSIZE=$(__retrieve_size "${args[++i]}")
+    (( $BOOTSIZE <= 0 )) &>/dev/null && printf "[!] ignoring invalid given boot size '%s'\n" "${args[++i]}" && exit 1 
     (( ++i ))
   elif [[ "$opt" == "-layout" || "$opt" == "--layout" ]]; then
     partitionLayout="${args[++i]}"
@@ -257,6 +366,73 @@ function parse(){
     printf "[-] Unknown option '%s'\n" "$opt"
   fi
  done
+}
+
+function setupArch(){
+  # Install packages
+  pacstrap -K /mnt "$packagesToInstall"
+  # Extra stuff 
+  if (( ${#basic_extra} > 0 )); then
+    echo "basic extra is not empty: $basic_extra"
+    pacstrap /mnt $basic_extra
+  else 
+    echo "basic extra is empty: $basic_extra"
+  fi
+  
+  # GRAPHICAL ENVIRONMENT
+  source graphicalenvs.sh
+  
+  # - Generate new system's fstab
+  genfstab -U /mnt > /mnt/etc/fstab
+  
+  # - Do some configuration in the new system
+
+  cat << EOF > /mnt/root/garch_autoinstall.sh 
+#!/bin/bash 
+# Gurgui's arch auto-install script
+
+# Upgrade system 
+pacman -Syuu --noconfirm
+
+# Create sudoer
+useradd -m "$user"
+
+$(if [ -z "$password" ]; then read -p -s "sudoer password: " pass; echo "pass=$pass"; fi)
+echo -e "$pass\n$pass" | passwd "$user" 
+echo -e "# Gurgui automated script\n"$user" ALL=(ALL : ALL) ALL" >> /etc/sudoers
+
+# Set hostname
+echo "$hostname" > /etc/hostname 
+
+# Set keyboard layout
+echo "$keyboard_layout" > /etc/vconsole.conf
+
+# Enable services 
+systemctl enable -y NetworkManager 
+$(enableGraphics && printf "systemctl enable -y %s" "$displayManager")
+
+# Install the bootloader
+grub-install "$DISK"
+
+# Update grub config file for further boots
+grub-mkconfig -o /boot/grub/grub.cfg 
+EOF
+
+  # Give 'garch_autoinstall.sh' script execute permissions and execute it
+  arch-chroot /mnt /bin/bash -c 'chmod +x /root/garch_autoinstall.sh'
+  arch-chroot /mnt /bin/bash -c '/root/garch_autoinstall.sh'
+  
+  # Delete it after being used
+  rm /mnt/root/garch_autoinstall.sh
+  
+  read -r -p "Installation done, reboot is required to enjoy the new system, umount and reboot now? y/n " res
+  
+  if [[ ${res,,} == "y" || ${res,,} == "yes" ]]
+  then
+    umount -a
+    swapoff "$DISK"2
+    reboot
+  fi
 }
 
 function main(){
@@ -267,7 +443,9 @@ function main(){
   setupDisk
 
   # Set desired graphical environment if --graphics was given
-  enableGraphics && setupGraphicalEnvironment
+  $enableGraphics && setupGraphicalEnvironment
+
+  setupArch
 
   # Do stuff
   loadkeys "$keyboard_layout"
@@ -277,77 +455,3 @@ function main(){
 
 main
 exit 1
-
-# - Install stuff in the new system
-
-# Essential stuff for the system to work (think about having networkmanager as default)
-
-pacstrap -K /mnt "$packagesToInstall"
-#pacstrap -K /mnt base linux linux-firmware grub efibootmgr networkmanager sudo
-
-# Extra stuff 
-if (( ${#basic_extra} > 0 )); then
-  echo "basic extra is not empty: $basic_extra"
-  pacstrap /mnt $basic_extra
-else 
-  echo "basic extra is empty: $basic_extra"
-fi
-
-# GRAPHICAL ENVIRONMENT
-source graphicalenvs.sh
-
-# - Generate new system's fstab
-genfstab -U /mnt > /mnt/etc/fstab
-
-# - Do some configuration in the new system
-
-cat << EOF > /mnt/root/garch_autoinstall.sh 
-#!/bin/bash 
-# Gurgui's arch auto-install script
-
-# Upgrade system 
-pacman -Syuu --noconfirm
-
-# Generate a random 16 character pseudorandom root password
-newpasswd=\$(head /dev/urandom | tr -dc A-Za-z0-9\!\@\#\$\%\^\&\*\(\)_\+\-\=\{\}\[\]\|\:\\\;\"\'\,\.\?\/ | head -c 16) 
-echo -e "\$newpasswd\n\$newpasswd" | passwd 
-newpasswd=""
-
-# Create sudoer
-useradd -m "$user"
-
-$(if [ -z "$password" ]; then read -p -s "sudoer password: " pass; echo "pass=$pass"; fi)
-echo -e "$pass\n$pass" | passwd "$user" 
-echo -e "# Gurgui automated script\n"$user" ALL=(ALL : ALL) ALL" >> /etc/sudoers
-# Set hostname
-echo "$hostname" > /etc/hostname 
-
-# Set keyboard layout
-echo "$keyboard_layout" > /etc/vconsole.conf
-
-# Enable services 
-systemctl enable -y NetworkManager 
-systemctl enable -y "$displayManager"
-
-# Install the bootloader
-grub-install "$DISK"
-
-# Update grub config file for further boots
-grub-mkconfig -o /boot/grub/grub.cfg 
-EOF
-
-# Give 'garch_autoinstall.sh' script execute permissions and execute it
-arch-chroot /mnt /bin/bash -c 'chmod +x /root/garch_autoinstall.sh'
-arch-chroot /mnt /bin/bash -c '/root/garch_autoinstall.sh'
-
-# Delete it after being used
-rm /mnt/root/garch_autoinstall.sh
-
-read -r -p "Installation done, reboot is required to enjoy the new system, umount and reboot now? y/n " res
-
-if [[ ${res,,} == "y" || ${res,,} == "yes" ]]
-then
-  umount -a
-  swapoff "$DISK"2
-  reboot
-fi
