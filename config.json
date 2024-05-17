@@ -1,0 +1,32 @@
+{
+    "kblayout": "es",
+    "mountpoint": "/mnt",
+    "disk": {
+        "path": "",
+        "scheme": "gpt",
+        "layout": "basic",
+    	"boot_size": 1048576,
+		"swap_size": 8388608,
+		"root_size": 0,
+		"home_size": 0,
+		"boot_path": "",
+		"swap_path": "",
+		"root_path": "",
+		"home_path": ""
+    },
+    "locale": "es_ES.UTF-8",
+	"timezone": "Atlantic/Canary",
+    "hostname": "arch1to",
+    "user": "admin",
+    "shell": "/bin/bash",
+    "nopasswd": false,
+    "enableGraphics": false,
+    "graphPack": "gnome",
+    "kernel": "linux",
+    "network": "networkmanager",
+    "firewall": "nftables",
+    "enableFirewall": true,
+    "extra": "",
+    "kernel": "linux",
+    "bundle": ""
+}
