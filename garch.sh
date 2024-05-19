@@ -2,11 +2,11 @@
 
 # + Variables
 argc=$#
-args=($@)
+read -a args <<< "$@"
 
-base_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-errlog="$base_dir/.errlog"
-outlog="$base_dir/.outlog"
+baseDir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+errlog="$baseDir/.errlog"
+outlog="$baseDir/.outlog"
 
 verbose=false
 
@@ -14,12 +14,7 @@ declare -A graphEnvs
 graphEnvs['gnome']="gnome gdm" # also 'gnome-extra'
 graphEnvs['lxqt']="lxqt sddm" # also 'lxqt-config lxdm'
 graphEnvs['kde_plasma']="plasma-meta sddm"
-graphEnvs['xfce']="xfce4 xdm" # also 'xfce4-goodies lightdm'
-graphEnvs['mate']="mate lightdm" # also 'mate-extra'
-graphEnvs['cinnamon']="cinnamon lightdm" # also 'cinnamon translations'
-graphEnvs['deepin']="deepin lightdm" # also 'deepin-extra'
-graphEnvs['enlightenment']="enlightenment lightdm" # also 'gdm'
-graphEnvs['budgie']="budgie-desktop lightdm"
+graphEnvs['xfce']="xfce4 lxdm" # also 'xfce4-goodies lightdm'
 
 declare -A packageBundle
 packageBundle['minimal']=""
@@ -34,19 +29,19 @@ kblayout="es"
 mountpoint="/mnt"
 fdiskcmd=""
 
-DISK=""
-DISK_SIZE=0
+disk=""
+diskSize=0
 AVAILABLE=0
 
-BOOT_SIZE=1048576 # 1GB (kb) 
-SWAP_SIZE=8388608 # 8GB (kb)
-ROOT_SIZE=0 # (kb)
-HOME_SIZE=0 # (kb)
+bootSize=1048576 # 1GB (kb) 
+swapSize=8388608 # 8GB (kb)
+rootSize=0 # (kb)
+homeSize=0 # (kb)
 
-BOOT_PATH=""
-SWAP_PATH=""
-ROOT_PATH=""
-HOME_PATH=""
+bootPath=""
+swapPath=""
+rootPath=""
+homePath=""
 
 partitionScheme="gpt"   # gpt|mbr
 partitionLayout="basic" # basic|advanced
@@ -74,20 +69,26 @@ enableFirewall=true
 # grub: bootloader
 # sudo: allows adding the default sudoer on /etc/sudoers to show all contents do "pacman -Fy && pacman -Fl sudo" 
 packagesToInstall="base linux-firmware grub sudo"
-
+enableOsprober=false
 #  - New System vars
 
 # - Variables
 
 # + Functions
 
+
 cleanup_cmd=("rm $outlog $errlog &>/dev/null")
-function __ctrl_c_handler(){
-  printf -- "\n-- Running cleanup\n"
-  for i in "${cleanup_cmd[@]}"; do 
-    printf "\t'%s'\n" "$i"
+function cleanup(){
+  for cmd in "${cleanup_cmd[@]}"; do 
+    $cmd &>/dev/null
+    #printf "\t'%s'\n" "$cmd"
   done
   exit 0
+}
+
+function __ctrl_c_handler(){
+  printf -- "\n-- Cleaning up\n"
+  cleanup
 }
 
 function usage(){
@@ -137,94 +138,110 @@ e.g ./garch.sh --user gurgui -j conf.json # 'gurgui' will get overriden by whate
 
 ** graphics **
 -graphics | --graphics : install and enable graphics - default false
+
+** bootloader **
+-oscheck | --osprober : check for additional OSes when running grub-install
+note: if you want to look for Windows installations, make sure you add '-extra ntfs-3g' to the command line
 EOF
 }
 
 #    + Graphical environment setup
-function setupGraphicalEnvironment(){
+function __chooseGraphicalEnvironment(){
+  local n=0
+  local dMan
   if [[ -z "$graphicalEnvironment" || -z "$displayManager" ]]; then
-    read -r -p "[?] Do you want to setup a graphical environment? y/n " ans
-  
-    if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
-      exit 1
-    fi
-    
-    n=0
-    for i in ${!graphEnv[@]}; do
+    for i in "${!graphEnvs[@]}"; do
      # Display options
-     dMan=$(echo ${graphEnv[$i]} | cut -d' ' -f2)
+     dMan=$(echo ${graphEnvs[$i]} | cut -d' ' -f2)
      printf " %i - %s - %s\n" "$n" "$i" "$dMan"
      (( ++n ))
     done
     
     read -r -p "-- Choice: " ans
     
-    if (( ans > $n-1 )); then
+    if (( ans > n-1 )); then
       printf "[-] Choice must be between 0 and %i\n" "$((n-1))"
       exit 1
     fi
     
     n=0
-    
     # Assign user choice to the variable
-    for i in "${!graphEnv[@]}"; do
-      if (( $n == ans )); then
-        graphicalEnvironment=$(cut -d ' ' -f 1 <<< "${graphEnv[$i]}" )
-        displayManager=$(cut -d ' ' -f 2 <<< "${graphEnv[$i]}" )
+    for i in "${!graphEnvs[@]}"; do
+      if (( n == ans )); then
+        graphicalEnvironment=$(cut -d ' ' -f 1 <<< "${graphEnvs[$i]}" )
+        displayManager=$(cut -d ' ' -f 2 <<< "${graphEnvs[$i]}" )
+        break
       fi
       (( ++n ))
     done
   fi
 } 
+
 #    - Graphical environment setup
 
 #    + Disk functions
 function __set_fdiskCommandGPT(){
  fdiskcmd+="g\\n" # Create GPT disklabel
- fdiskcmd+="n\\n\\n\\n+""$BOOT_SIZE""K\\nt\\nuefi\\n"     # Create boot partition
- fdiskcmd+="n\\n\\n\\n+""$SWAP_SIZE""K\\nt\\n2\\nswap\\n" # Create swap partition
+ fdiskcmd+="n\\n\\n\\n+""$bootSize""K\\nt\\nuefi\\n"     # Create boot partition
+ fdiskcmd+="n\\n\\n\\n+""$swapSize""K\\nt\\n2\\nswap\\n" # Create swap partition
 
  if [ "${partitionLayout,,}" == "basic" ]; then
   fdiskcmd+="n\\n\\n\\n\\nt\\n3\\nlinux\\n" # Root partition
  elif [ "${partitionLayout,,}" == "advanced" ]; then
-  fdiskcmd+="n\\n\\n\\n+""$ROOT_SIZE""K\\nt\\n3\\n23\\n" # Root partition - Type code 23 = linux root (x86-64)
+  fdiskcmd+="n\\n\\n\\n+""$rootSize""K\\nt\\n3\\n23\\n" # Root partition - Type code 23 = linux root (x86-64)
   fdiskcmd+="n\\n\\n\\n\\nt\\n4\\nlinux\\n"     # Home partition - Type code 42 = linux home
  fi
 }
 
 function __set_fdiskCommandMBR(){
   fdiskcmd="o\\n" # Create DOS (MBR) disklabel
-  fdiskcmd+="n\\n\\n\\n\\n+""$BOOT_SIZE""K\\nt\\nlinux\\na\\n" # Create boot partition and mark as bootable
-  fdiskcmd+="n\\n\\n\\n\\n+""$SWAP_SIZE""K\\nt\\n2\\nswap\\n"  # Create swap partition
+  fdiskcmd+="n\\n\\n\\n\\n+""$bootSize""K\\nt\\nlinux\\na\\n" # Create boot partition and mark as bootable
+  fdiskcmd+="n\\n\\n\\n\\n+""$swapSize""K\\nt\\n2\\nswap\\n"  # Create swap partition
 
   if [ "${partitionLayout,,}" == "basic" ]; then
     fdiskcmd+="n\\n\\n\\n\\n\\nt\\n3\\nlinux\\n"
   elif [ "${partitionLayout,,}" == "advanced" ]; then
-    fdiskcmd+="n\\n\\n\\n\\n+""$ROOT_SIZE""K\\nt\\n3\\nlinux\\n"
+    fdiskcmd+="n\\n\\n\\n\\n+""$rootSize""K\\nt\\n3\\nlinux\\n"
     fdiskcmd+="n\\np\\n\\n\\nt\\n4\\nlinux\\n"
   fi
 }
 
-function __set_TargetDisk(){
-  local availableDisks=($(lsblk -dn -o PATH,SIZE | grep -v "0B\|ram\|sr" | awk '{print $1}'))
-  n=0
+function __chooseDiskFromMenu() {
+  local upArrow=$'\e[A' downArrow=$'\e[B'
+  local diskTable diskList count
+  local cpos=0  index=0
 
-  printf -- "-- Looking for disks in the system...\n\n"
+  diskTable=$(lsblk -And -o PATH,SIZE,MODEL,FSTYPE | grep -v "ram\|sr")
+  diskList=($(lsblk -And -o PATH | grep -v "ram\|sr"))
+  count=$(wc -l <<< $diskTable)
   
-  for disk in ${availableDisks[@]}; do
-    printf "    %i: %s\n" "$n" "$(lsblk -o PATH,SIZE,MODEL -dn $disk)" 
-    ((++n))  
-  done
-  
-  while true; do
-    printf "\n"
-    read -p "-- Choice: " ans
-    if [[ $ans =~ ^[0-9]$ ]] && (( ans < ${#availableDisks[@]} && ans >= 0 )); then
-      DISK=${availableDisks[ans]}  
-      break
-    else
-      continue
-    fi
+  printf "== Select disk ==\n"
+  while true
+  do
+      # list all options (option list is zero-based)
+      index=0 
+      while read -r line; 
+      do
+          if [ "$index" == "$cpos" ]
+            then echo -e " >\e[7m$line\e[0m" # mark & highlight the current option
+            else echo "  $line"
+          fi
+          index=$(( index + 1 ))
+      done <<< "$diskTable"
+      read -rs -n3 key # wait for user to key in arrows or ENTER
+      if [[ $key == "$upArrow" ]]; then
+        # up arrow
+        (( --cpos  ))
+        (( cpos <= 0 )) && cpos=0
+      elif [[ $key == "$downArrow" ]] then 
+        # down arrow
+        (( ++cpos ))
+        (( cpos >= count )) && cpos=$(( count - 1 ))
+      elif [[ $key == "" ]]; then
+        disk="${diskList[cpos]}"
+        break
+      fi
+      echo -en "\e[${count}A" # go up to the beginning to re-render
   done
 }
 
@@ -247,47 +264,47 @@ function __fail_mkfs(){
 
 function setupDisk(){
 
-  if [[ "$DISK" =~ [0-9]$ ]]; then
-    BOOT_PATH="$DISK"p1
-    SWAP_PATH="$DISK"p2
-    ROOT_PATH="$DISK"p3
+  if [[ "$disk" =~ [0-9]$ ]]; then
+    bootPath="$disk"p1
+    swapPath="$disk"p2
+    rootPath="$disk"p3
   else
-    BOOT_PATH="$DISK"1
-    SWAP_PATH="$DISK"2
-    ROOT_PATH="$DISK"3
+    bootPath="$disk"1
+    swapPath="$disk"2
+    rootPath="$disk"3
   fi
 
-  DISK_SIZE=$(( $(lsblk -o SIZE -bdn "$DISK") / 1024 ))
-  AVAILABLE="$DISK_SIZE"
+  diskSize=$(( $(lsblk -o SIZE -bdn "$disk") / 1024 ))
+  AVAILABLE="$diskSize"
 
-  for kilobytes in $BOOT_SIZE $SWAP_SIZE; do
+  for kilobytes in $bootSize $swapSize; do
     (( AVAILABLE -= "$kilobytes" ))
   done
   
-  (( $AVAILABLE <= 0 )) && printf "[-] Not enough memory %lu kb for boot and %lu kb for swap\n[-] Aborting...\n" "$BOOT_SIZE" "$SWAP_SIZE" && exit 1 
+  (( AVAILABLE <= 0 )) && printf "[-] Not enough memory %lu kb for boot and %lu kb for swap\n[-] Aborting...\n" "$bootSize" "$swapSize" && exit 1 
   
   if [ "${partitionLayout}" == "advanced" ]; then
-    ROOT_SIZE=$(( AVAILABLE / 100 * 40 )) # root:40% home:60%
-    HOME_SIZE=$(( AVAILABLE - ROOT_SIZE ))
-    if [[ "$DISK" =~ [0-9]$ ]]; then 
-      HOME_PATH="$DISK"p4
+    rootSize=$(( AVAILABLE * 40 / 100  )) # root:40% home:60%
+    homeSize=$(( AVAILABLE - rootSize ))
+    if [[ "$disk" =~ [0-9]$ ]]; then 
+      homePath="$disk"p4
     else
-      HOME_PATH="$DISK"4
+      homePath="$disk"4
     fi
   else
-    ROOT_SIZE="$AVAILABLE"
+    rootSize="$AVAILABLE"
   fi
 
   # Check if target disk got swap ON
-  grep -q "$DISK" /proc/swaps && swapoff "$SWAP_PATH" &>/dev/null
+  grep -q "$disk" /proc/swaps && swapoff "$swapPath" &>/dev/null
   
   # Umount partitions
-  umount "$BOOT_PATH" &>/dev/null
-  umount "$ROOT_PATH" &>/dev/null
-  umount "$HOME_PATH" &>/dev/null
+  umount "$bootPath" &>/dev/null
+  umount "$rootPath" &>/dev/null
+  umount "$homePath" &>/dev/null
   
   # Check if target disk is mounted
-  if df --output=source | grep -q "$DISK"; then 
+  if df --output=source | grep -q "$disk"; then 
     printf -- "-- Couldn't umount, exiting...\n" && exit 1
   fi
 
@@ -311,12 +328,12 @@ function setupDisk(){
 ################### Disk layout ######################
                                                     
     PART          PATH            SIZE               
-    boot          $BOOT_PATH    $(( BOOT_SIZE )) Kb 
-    swap          $SWAP_PATH    $(( SWAP_SIZE )) Kb 
-    root          $ROOT_PATH    $(( ROOT_SIZE )) Kb 
+    boot          $bootPath    $(( bootSize )) Kb 
+    swap          $swapPath    $(( swapSize )) Kb 
+    root          $rootPath    $(( rootSize )) Kb 
 EOF
 
-  (( $HOME_SIZE > 0 )) && printf "    home          %s    %s Kb\n" "$HOME_PATH" "$HOME_SIZE"
+  (( homeSize > 0 )) && printf "    home          %s    %s Kb\n" "$homePath" "$homeSize"
 
   printf "\n######################################################\n\n"
   # Ask for confirmation since disk wiping / partition erasing will be made
@@ -326,70 +343,75 @@ EOF
   fi
   
   # Wipe existing signatures and partition table entries
-  sfdisk --delete "$DISK" &>/dev/null
-  wipefs --force --all "$DISK" &>/dev/null
+  sfdisk --delete "$disk" &>/dev/null
+  wipefs --force --all "$disk" &>/dev/null
 
   # Partition the disk
-  echo -e "$fdiskcmd" | fdisk -w always -W always "$DISK" &>/dev/null
+  echo -e "$fdiskcmd" | fdisk -w always -W always "$disk" &>/dev/null
 
   if (( $? == 1 )); then
     printf "[-] Disk partitioning failed\n"
     exit 1
   fi
 
-  partprobe "$DISK" &>/dev/null 1>>$outlog 2>>$errlog || { printf "[-] Partprobe failed before partitioning the disk"; exit 1; }
+  partprobe "$disk" 1>>"$outlog" 2>>"$errlog" || { printf "[-] Partprobe failed before partitioning the disk"; exit 1; }
 
   # Create root and swap filesystems since they will be the same for both mbr | gpt 
-  mkfs.ext4 -F "$ROOT_PATH" 1>>$outlog 2>>$errlog || __fail_mkfs "ext4" "$ROOT_PATH"
-  mkswap -f "$SWAP_PATH"    1>>$outlog 2>>$errlog || __fail_mkfs "swap" "$SWAP_PATH"
+  mkfs.ext4 -F "$rootPath" 1>>"$outlog" 2>>"$errlog" || __fail_mkfs "ext4" "$rootPath"
+  mkswap -f "$swapPath"    1>>"$outlog" 2>>"$errlog" || __fail_mkfs "swap" "$swapPath"
 
   # Mount the disk
   if [ "${partitionScheme,,}" == "mbr" ]; then
     # Create appropiate boot fs
     local boot_mountpoint="$mountpoint/boot"
-    mkfs.ext2 -F "$BOOT_PATH" 1>>$outlog 2>>$errlog || __fail_mkfs "ext2" "$BOOT_PATH"
+    mkfs.ext2 -F "$bootPath" 1>>"$outlog" 2>>"$errlog" || __fail_mkfs "ext2" "$bootPath"
     
-    mount "$ROOT_PATH" "$mountpoint" 1>>$outlog 2>>$errlog || __fail_mount "$ROOT_PATH" "$mountpoint"
-    mkdir -p "$boot_mountpoint" 1>>$outlog 2>>$errlog || __fail_createdir "$boot_mountpoint"
-    mount "$BOOT_PATH" "$boot_mountpoint" 1>>$outlog 2>>$errlog || __fail_mount "$BOOT_PATH" "$boot_mountpoint"   
+    mount "$rootPath" "$mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_mount "$rootPath" "$mountpoint"
+    mkdir -p "$boot_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_createdir "$boot_mountpoint"
+    mount "$bootPath" "$boot_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_mount "$bootPath" "$boot_mountpoint"   
 
     if [ "${partitionLayout}" == "advanced" ]; then
       local home_mountpoint="$mountpoint/home"
-      mkfs.ext4 -F "$HOME_PATH" 1>>$outlog 2>>$errlog || __fail_mkfs "ext4" "$HOME_PATH" 
+      mkfs.ext4 -F "$homePath" 1>>"$outlog" 2>>"$errlog" || __fail_mkfs "ext4" "$homePath" 
 
-      mkdir -p "$home_mountpoint" 1>>$outlog 2>>$errlog || __fail_createdir "$home_mountpoint"
-      mount "$HOME_PATH" "$home_mountpoint" 1>>$outlog 2>>$errlog || __fail_mount "$HOME_PATH" "$home_mountpoint"
+      mkdir -p "$home_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_createdir "$home_mountpoint"
+      mount "$homePath" "$home_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_mount "$homePath" "$home_mountpoint"
     fi
   elif [ "${partitionScheme,,}" == "gpt" ]; then
     # Create appropiate boot fs
-    mkfs.vfat -F32 "$BOOT_PATH" 1>>$outlog 2>>$errlog || __fail_mkfs "FAT32" "$BOOT_PATH"
+    mkfs.vfat -F32 "$bootPath" 1>>"$outlog" 2>>"$errlog" || __fail_mkfs "FAT32" "$bootPath"
 
     local boot_mountpoint="$mountpoint/boot/efi"
 
-    mount "$ROOT_PATH" "$mountpoint" 1>>$outlog 2>>$errlog || __fail_mount "$ROOT_PATH" "$mountpoint"
-    mkdir -p "$boot_mountpoint" 1>>$outlog 2>>$errlog || __fail_createdir "$boot_mountpoint"
-    mount "$BOOT_PATH" "$boot_mountpoint" 1>>$outlog 2>>$errlog || __fail_mount "$BOOT_PATH" "$boot_mountpoint"
+    mount "$rootPath" "$mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_mount "$rootPath" "$mountpoint"
+    mkdir -p "$boot_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_createdir "$boot_mountpoint"
+    mount "$bootPath" "$boot_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_mount "$bootPath" "$boot_mountpoint"
 
     if [ "${partitionLayout,,}" == "advanced" ]; then
       local home_mountpoint="$mountpoint/home"
 
-      mkfs.ext4 -F "$HOME_PATH" 1>>$outlog 2>>$errlog || __fail_mkfs "ext4" "$HOME_PATH"
+      mkfs.ext4 -F "$homePath" 1>>"$outlog" 2>>"$errlog" || __fail_mkfs "ext4" "$homePath"
 
-      mkdir -p "$home_mountpoint" 1>>$outlog 2>>$errlog || __fail_createdir "$home_mountpoint"
-      mount "$HOME_PATH" "$home_mountpoint" 1>>$outlog 2>>$errlog || __fail_mount "$HOME_PATH" "$home_mountpoint"
+      mkdir -p "$home_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_createdir "$home_mountpoint"
+      mount "$homePath" "$home_mountpoint" 1>>"$outlog" 2>>"$errlog" || __fail_mount "$homePath" "$home_mountpoint"
     fi
   fi
 
   # Enable swap
-  swapon "$SWAP_PATH"
+  swapon "$swapPath"
 
-  partprobe "$DISK" &>/dev/null 1>>$outlog 2>>$errlog || { printf "[-] Partprobe failed after partitioning the disk"; exit 1 ;}
+  partprobe "$disk" 1>>$outlog 2>>"$errlog" || { printf "[-] Partprobe failed after partitioning the disk"; exit 1 ;}
 
   # Print disk layout after being partitioned
-  fdisk -o device,size,type -l "$DISK" | grep -E "^(/|Disk $DISK|Disklabel|Disk identifier)"
+  fdisk -o device,size,type -l "$disk" | grep -E "^(/|Disk $disk|Disklabel|Disk identifier)"
 } 
 #    - Disk functions
 
+function setupGraphicalEnvironment(){
+  $enableGraphics || return 
+
+  arch-chroot "$mountpoint" /bin/bash -c "systemctl enable $graphicalEnvironment"
+}
 
 function setupNetwork(){
   echo "-- Unimplemented setupNetwork()"
@@ -428,7 +450,6 @@ cat << EOF > "$mountpoint/etc/iptables.rules"
 -A INPUT -i lo -j ACCEPT
 COMMIT
 EOF
-    arch-chroot "$mountpoint" /bin/bash -c "systemctl enable iptables"
   elif [ "${firewall,,}" == "nftables" ]; then
     # Setup nftables
     arch-chroot "$mountpoint" /bin/bash -c "mv /etc/nftables.conf /etc/nftables.conf.original"
@@ -461,10 +482,12 @@ table inet filter {
         }
 }
 EOF
-    arch-chroot "$mountpoint" /bin/bash -c "systemctl enable nftables"
   else
     printf "[-] Unsupported firewall '%s' - omitting setup\n" "$firewall"
   fi
+
+  # Enable firewall service (iptables required to be enabled, nftables will load rules)
+  arch-chroot "$mountpoint" /bin/bash -c "systemctl enable $firewall"
 }
 
 function setupArch(){
@@ -475,15 +498,13 @@ function setupArch(){
   fi
 
   # - Install packages
-  cmd="pacstrap -K "$mountpoint" "$packagesToInstall"" 
-  printf -- "-- Installing packages on new system - %s\n" "$cmd" 
-  $cmd &>/dev/null
-
-  if (( $? != 0 )) then
+  cmd="pacstrap -K $mountpoint $packagesToInstall"
+  printf -- "-- Installing packages on new system - %s\n" "$cmd" | tee -a "$outlog"
+  if ! $cmd 1>>"$outlog" 2>>"$errlog"; then
     printf "[-] Installing packages failed\n"
     exit 1
   fi
-  
+
   # - Do some configuration in the new system
   cat << EOF > "$mountpoint/root/garch_autoinstall.sh" 
 #!/bin/bash
@@ -513,8 +534,10 @@ useradd -m "$user" -s "$shell"
 
 echo -e "# Gurgui automated script\n"$user" ALL=(ALL : ALL) $($nopasswd && printf "NOPASSWD: %s " "$user")ALL" >> /etc/sudoers
 
+$($enableOsprober && echo "sed -i 's/^#GRUB_DISABLE_OS_PROBER/GRUB_DISABLE_OS_PROBER/' /etc/default/grub")
+
 # Install the bootloader
-grub-install "$BOOT_PATH"
+grub-install "$bootPath"
 
 # Update grub config file for next boots
 grub-mkconfig -o /boot/grub/grub.cfg 
@@ -523,23 +546,25 @@ EOF
 
   # - Generate new system's fstab
   genfstab -U "$mountpoint" > "$mountpoint/etc/fstab"
+  
   # - Comment out boot entry
-  sed -i "s%$BOOT_PATH%#$BOOT_PATH%" "$mountpoint/etc/fstab"
+  sed -i "s%$bootPath%#$bootPath%" "$mountpoint/etc/fstab"
+
   # Set user password
   printf -- "-- User: '%s'\n" "$user"
   passwd -R "$mountpoint" "$user"
 
   setupFirewall # Will inmediatly return if $enableFirewall == false
-
+  setupGraphicalEnvironment
   # TODO - function setupNvidia()
 
   # Umount the disk and turn swap off
-  for partition in "$HOME_PATH" "$BOOT_PATH" "$ROOT_PATH"; do
+  for partition in "$homePath" "$bootPath" "$rootPath"; do
     if [ -d "$partition" ]; then 
-      umount "$partition" &>/dev/null || __fail_umount "$partition"
+      umount "$partition" 1>>"$outlog" 2>>"$errlog" || __fail_umount "$partition"
     fi
   done
-  swapoff "$SWAP_PATH" &>/dev/null
+  swapoff "$swapPath" &>/dev/null
 
   read -r -p "[+] Installation done, reboot now? y/n " res
   
@@ -570,6 +595,12 @@ function checkVariables(){
     esac
   fi
 
+  # -- graphics 
+  if $enableGraphics; then
+    __chooseGraphicalEnvironment
+    packagesToInstall="$packagesToInstall $displayManager $graphicalEnvironment"
+  fi
+
   # -- kernel choice
   local exist=false
   for k in $supportedKernels; do
@@ -585,18 +616,24 @@ function checkVariables(){
   fi
 
   # -- disk
-  if [[ -z "$DISK" ]]; then
-    __set_TargetDisk
-  fi
+  [ -z "$disk" ] && __chooseDiskFromMenu
 
-  if ! lsblk "$DISK" &>/dev/null; then 
-    printf "[-] Path '%s' is not a block device\n" "$DISK" && exit 1
+  if ! lsblk "$disk" &>/dev/null; then 
+    printf "[-] Path '%s' is not a block device\n" "$disk" && exit 1
   fi
 
   case "${partitionLayout,,}" in
     basic | advanced ) ;;
     * ) printf "[-] Invalid partition layout\nbasic: / boot swap (3 partitions)\nadvanced: / /home boot swap (4 partitions)\n" && exit 0
   esac
+
+  (( swapSize <= 0 )) && printf "[-] swap size '-%s Kb' must be a positive integer\n" "$swapSize" && exit 1
+  (( bootSize <= 0 )) && printf "[-] boot size '-%s Kb' must be a positive integer > 0\n" "$bootSize" && exit 1 
+
+  # -- osprober
+  if [ $enableOsprober == true ]; then
+    packagesToInstall="$packagesToInstall os-prober"
+  fi
 }
 
 function loadJson(){
@@ -604,7 +641,8 @@ function loadJson(){
   if ! command -v jq &>/dev/null; then
     read -rp "[+] Need to install 'jq' in order to use -j | --json, proceed? y/n " ans
     if [[ "${ans,,}" == "y" || "${ans,,}" = "yes" ]]; then
-      pacman -S --noconfirm jq &>/dev/null || printf "[+] Couldn't install, ensure proper permissions or install it yourself 'pacman -S --noconfirm jq'\n" && exit 0
+      pacman -Sy &>/dev/null
+      pacman -S --noconfirm jq &>/dev/null || { printf "[+] Couldn't install, ensure proper permissions or install it yourself 'pacman -S --noconfirm jq'\n"; exit 0; }
     else
       exit 0
     fi
@@ -612,54 +650,62 @@ function loadJson(){
 
   local config="$1"
 
-  [ -e "$config" ] || { printf "[+] Config '%s' doesn't exist\n"; exit 1; }
+  [ -e "$config" ] || { printf "[+] Config '%s' doesn't exist\n" "$config" ; exit 1; }
 
-  kblayout=$(jq -r ".kblayout" "$config")
-  mountpoint=$(jq -r ".mountpoint" "$config")
+  local json
+  json=$(cat "$config")
+
+  kblayout=$(jq -r ".kblayout" <<< "$json")
+  mountpoint=$(jq -r ".mountpoint" <<< "$json")
   
-  DISK=$(jq -r ".disk.path" "$config")
-  partitionScheme=$(jq -r ".disk.scheme" "$config")
-  partitionLayout=$(jq -r ".disk.layout" "$config")
-  BOOT_SIZE=$(jq -r ".disk.boot_size" "$config")
-  BOOT_PATH=$(jq -r ".disk.boot_path" "$config")
-  SWAP_SIZE=$(jq -r ".disk.swap_size" "$config")
-  SWAP_PATH=$(jq -r ".disk.swap_path" "$config")
-  ROOT_SIZE=$(jq -r ".disk.root_size" "$config")
-  ROOT_PATH=$(jq -r ".disk.root_path" "$config")
-  HOME_SIZE=$(jq -r ".disk.home_size" "$config")
-  HOME_PATH=$(jq -r ".disk.home_path" "$config")
+  disk=$(jq -r ".disk.path" <<< "$json")
+  partitionScheme=$(jq -r ".disk.scheme" <<< "$json")
+  partitionLayout=$(jq -r ".disk.layout" <<< "$json")
+  bootSize=$(jq -r ".disk.boot_size" <<< "$json")
+  bootPath=$(jq -r ".disk.boot_path" <<< "$json")
+  swapSize=$(jq -r ".disk.swap_size" <<< "$json")
+  swapPath=$(jq -r ".disk.swap_path" <<< "$json")
+  rootSize=$(jq -r ".disk.root_size" <<< "$json")
+  rootPath=$(jq -r ".disk.root_path" <<< "$json")
+  homeSize=$(jq -r ".disk.home_size" <<< "$json")
+  homePath=$(jq -r ".disk.home_path" <<< "$json")
   
-  user=$(jq -r ".user" "$config")
-  locale=$(jq -r ".locale" "$config")
-  timezone=$(jq -r ".timezone" "$config")
-  hostname=$(jq -r ".hostname" "$config")
-  shell=$(jq -r ".shell" "$config")
-  nopasswd=$(jq -r ".nopasswd" "$config")
-  enableGraphics=$(jq -r ".enableGraphics" "$config")
-  graphPack=$(jq -r ".graphPack" "$config")
-  kernel=$(jq -r ".kernel" "$config")
-  network=$(jq -r ".network" "$config")
-  enableFirewall=$(jq -r ".enableFirewall" "$config")
-  firewall=$(jq -r ".firewall" "$config")
-  extra=$(jq -r ".extra" "$config")
-  packagesToInstall+=" ${packageBundle[$(jq -r ".bundle" "$config")]}"
+  user=$(jq -r ".user" <<< "$json")
+  locale=$(jq -r ".locale" <<< "$json")
+  timezone=$(jq -r ".timezone" <<< "$json")
+  hostname=$(jq -r ".hostname" <<< "$json")
+  shell=$(jq -r ".shell" <<< "$json")
+  nopasswd=$(jq -r ".nopasswd" <<< "$json")
+  enableGraphics=$(jq -r ".enableGraphics" <<< "$json")
+  graphPack=$(jq -r ".graphPack" <<< "$json")
+  kernel=$(jq -r ".kernel" <<< "$json")
+  network=$(jq -r ".network" <<< "$json")
+  enableFirewall=$(jq -r ".enableFirewall" <<< "$json")
+  firewall=$(jq -r ".firewall" <<< "$json")
+  extra=$(jq -r ".extra" <<< "$json")
+  local bundle="$(jq -r ".bundle" <<< "$json")"
+  if [ ! -z "$bundle" ]; then
+    packagesToInstall+=" ${packageBundle[bundle]}"
+  fi
+  enableOsprober=$(jq -r ".enableOsprober" <<< "$json")
 }
 
 function __retrieve_size(){
   # $1 - user input, e.g 5G, 4M, 3K, 2B
+  # $2 - outvar, size in Kilobytes
   size="${1:0: -1}"
   unit="${1: -1}"
 
   case "${unit,,}" in
-    g ) printf -- "%lu" "$(( $size * 1024 * 1024 ))" ;;
-    m ) printf -- "%lu" "$(( $size * 1024  ))" ;;
-    k ) printf -- "%lu" "$size" ;;
-    b ) printf -- "%lu" "$(( $size / 1024 ))" ;;
-    * ) printf -- "-1"
+    g ) printf -v $2 -- "%lu" "$(( size * 1024 * 1024 ))" ;;
+    m ) printf -v $2 -- "%lu" "$(( size * 1024  ))" ;;
+    k ) printf -v $2 -- "%lu" "$size" ;;
+    b ) printf -v $2 -- "%lu" "$(( size / 1024 ))" ;;
+    * ) printf -v $2 -- "-1"
   esac
 }
 
-function parse(){
+function parseArgs(){
  for (( i = 0 ; i < $argc ; ++i )); do
   opt="${args[i],,}"
   if   [[ "$opt" == "-h" || "$opt" == "--help" ]]; then
@@ -667,7 +713,7 @@ function parse(){
   elif [[ "$opt" == "-v" || "$opt" == "--verbose" ]]; then
     verbose=true
   elif [[ "$opt" == "-d" || "$opt" == "--disk" ]]; then
-    DISK="${args[++i]}"
+    disk="${args[++i]}"
   elif [[ "$opt" == "-u" || "$opt" == "--user" ]]; then
     user="${args[++i]}"
   elif [[ "$opt" == "-p" || "$opt" == "--pass" ]]; then
@@ -686,6 +732,7 @@ function parse(){
     partitionScheme="gpt"
   elif [[ "$opt" == "-extra" || "$opt" == "--extra-packages" ]]; then
     packagesToInstall+=" $(echo "${args[++i]}" | tr ',' ' ')"
+    (( ++i ))
   elif [[ "$opt" == "-bundle" || "$opt" == "--package-bundle" ]]; then
     packagesToInstall+=" ${packageBundle["${args[++i]}"]}"
   elif [[ "$opt" == "-G" || "$opt" == "--set-graphics" ]]; then
@@ -697,17 +744,15 @@ function parse(){
   elif [[ "$opt" == "-mnt" || "$opt" == "--mountpoint" ]]; then
     mountpoint="${args[++i]}"
   elif [[ "$opt" == "-swap" || "$opt" == "--swapsize" ]]; then
-    SWAP_SIZE=$(__retrieve_size "${args[++i]}")
-    (( $SWAP_SIZE <= 0 )) && printf "[-] swap size '%s' must be a positive integer > 0\n " "${args[++i]}" && exit 1
-    (( ++i ))
+    __retrieve_size "${args[++i]}" swapSize
   elif [[ "$opt" == "-boot" || "$opt" == "--bootsize" ]]; then
-    BOOT_SIZE=$(__retrieve_size "${args[++i]}")
-    (( $BOOT_SIZE <= 0 )) && printf "[-] boot size '%s' must be a positive integer > 0\n" "${args[++i]}" && exit 1 
-    (( ++i ))
+    __retrieve_size "${args[++i]}" bootSize
   elif [[ "$opt" == "-layout" || "$opt" == "--layout" ]]; then
     partitionLayout="${args[++i]}"
   elif [[ "$opt" == "-j" || "$opt" == "--json" ]]; then
     loadJson "${args[++i]}"
+  elif [[ "$opt" == "-oscheck" || "$opt" == --osprober ]]; then
+    enableOsprober=true
   else 
     printf "[-] Unknown option '%s'\n" "$opt"
   fi
@@ -721,21 +766,17 @@ function main(){
   trap __ctrl_c_handler SIGINT # handler
 
   # Empty any previous logs
-  date > $errlog
-  date > $outlog
+  printf "Starting garch.sh %s\n" "$(date)" > "$errlog"
+  printf "Starting garch.sh %s\n" "$(date)" > "$outlog"
 
   # Parse arguments (override, checks etc.)
-  parse
+  parseArgs
   
-  # Get target disk interactively and set DISK | DISK_SIZE variables
+  # Get target disk interactively and set disk | disk_SIZE variables
   setupDisk
-
-  # Set desired graphical environment if graphics=true
-  $enableGraphics && setupGraphicalEnvironment
 
   # Set up the new system basic config + bootloader
   setupArch
-
   exit 0
 }
 
