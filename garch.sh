@@ -79,11 +79,12 @@ enableOsprober=false
 
 cleanup_cmd=("rm $outlog $errlog &>/dev/null")
 function cleanup(){
+  local lastCode=$?
   for cmd in "${cleanup_cmd[@]}"; do 
     $cmd &>/dev/null
     #printf "\t'%s'\n" "$cmd"
   done
-  exit 0
+  exit $lastCode
 }
 
 function __ctrl_c_handler(){
@@ -161,7 +162,7 @@ function __chooseGraphicalEnvironment(){
     
     if (( ans > n-1 )); then
       printf "[-] Choice must be between 0 and %i\n" "$((n-1))"
-      exit 1
+      cleanup
     fi
     
     n=0
@@ -246,20 +247,16 @@ function __chooseDiskFromMenu() {
 }
 
 function __fail_mount(){
-  printf "[-] Failed mounting '%s' on '%s' - exit code %i\n" "$1" "$2" "$?"
-  exit 1
+  printf "[-] Failed mounting '%s' on '%s' - exit code %i\n" "$1" "$2" "$?" && cleanup
 }
 function __fail_umount(){
-  printf "[-] Failed umounting '%s' - exit code %i\n" "$1" "$?"
-  exit 1
+  printf "[-] Failed umounting '%s' - exit code %i\n" "$1" "$?" && cleanup
 }
 function __fail_createdir(){
-  printf "[-] Failed creating directory '%s' - exit code %i\n" "$1" "$?"
-  exit 1
+  printf "[-] Failed creating directory '%s' - exit code %i\n" "$1" "$?" && cleanup
 }
 function __fail_mkfs(){
-  printf "[-] Failed creating filesystem '%s' on '%s' - exit code %i\n" "$1" "$2" "$?"
-  exit 1
+  printf "[-] Failed creating filesystem '%s' on '%s' - exit code %i\n" "$1" "$2" "$?" && cleanup
 }
 
 function setupDisk(){
@@ -281,7 +278,7 @@ function setupDisk(){
     (( AVAILABLE -= "$kilobytes" ))
   done
   
-  (( AVAILABLE <= 0 )) && printf "[-] Not enough memory %lu kb for boot and %lu kb for swap\n[-] Aborting...\n" "$bootSize" "$swapSize" && exit 1 
+  (( AVAILABLE <= 0 )) && printf "[-] Not enough memory %lu kb for boot and %lu kb for swap\n[-] Aborting...\n" "$bootSize" "$swapSize" && cleanup 
   
   if [ "${partitionLayout}" == "advanced" ]; then
     rootSize=$(( AVAILABLE * 40 / 100  )) # root:40% home:60%
@@ -299,13 +296,13 @@ function setupDisk(){
   grep -q "$disk" /proc/swaps && swapoff "$swapPath" &>/dev/null
   
   # Umount partitions
-  umount "$bootPath" &>/dev/null
-  umount "$rootPath" &>/dev/null
-  umount "$homePath" &>/dev/null
+  umount "$bootPath" 1>>"$outlog" 2>>"$errlog"
+  umount "$homePath" 1>>"$outlog" 2>>"$errlog"
+  umount "$rootPath" 1>>"$outlog" 2>>"$errlog"
   
   # Check if target disk is mounted
   if df --output=source | grep -q "$disk"; then 
-    printf -- "-- Couldn't umount, exiting...\n" && exit 1
+    printf -- "-- Couldn't umount, exiting...\n" && cleanup
   fi
 
   case "${partitionScheme,,}" in
@@ -317,7 +314,7 @@ function setupDisk(){
       __set_fdiskCommandMBR
       ;;
     *)
-      printf "[-] Detected wrong partitioning scheme '%s'\n" "${partitionScheme,,}" && exit 1
+      printf "[-] Detected wrong partitioning scheme '%s'\n" "${partitionScheme,,}" && cleanup
       ;;
   esac
 
@@ -336,10 +333,11 @@ EOF
   (( homeSize > 0 )) && printf "    home          %s    %s Kb\n" "$homePath" "$homeSize"
 
   printf "\n######################################################\n\n"
+
   # Ask for confirmation since disk wiping / partition erasing will be made
   read -r -p "-- WARNING - This will erase signatures from existing disk and delete partitions, continue? y/n: " ans
   if [[ "${ans,,}" == "n" || "${ans,,}" == "no" ]]; then 
-    exit 0 
+    cleanup 
   fi
   
   # Wipe existing signatures and partition table entries
@@ -351,10 +349,10 @@ EOF
 
   if (( $? == 1 )); then
     printf "[-] Disk partitioning failed\n"
-    exit 1
+    cleanup
   fi
 
-  partprobe "$disk" 1>>"$outlog" 2>>"$errlog" || { printf "[-] Partprobe failed before partitioning the disk"; exit 1; }
+  partprobe "$disk" 1>>"$outlog" 2>>"$errlog" || { printf "[-] Partprobe failed before partitioning the disk"; cleanup; }
 
   # Create root and swap filesystems since they will be the same for both mbr | gpt 
   mkfs.ext4 -F "$rootPath" 1>>"$outlog" 2>>"$errlog" || __fail_mkfs "ext4" "$rootPath"
@@ -400,7 +398,7 @@ EOF
   # Enable swap
   swapon "$swapPath"
 
-  partprobe "$disk" 1>>$outlog 2>>"$errlog" || { printf "[-] Partprobe failed after partitioning the disk"; exit 1 ;}
+  partprobe "$disk" 1>>$outlog 2>>"$errlog" || { printf "[-] Partprobe failed after partitioning the disk"; cleanup ;}
 
   # Print disk layout after being partitioned
   fdisk -o device,size,type -l "$disk" | grep -E "^(/|Disk $disk|Disklabel|Disk identifier)"
@@ -410,11 +408,12 @@ EOF
 function setupGraphicalEnvironment(){
   $enableGraphics || return 
 
-  arch-chroot "$mountpoint" /bin/bash -c "systemctl enable $graphicalEnvironment"
+  arch-chroot "$mountpoint" /bin/bash -c "systemctl enable $displayManager"
 }
 
 function setupNetwork(){
   echo "-- Unimplemented setupNetwork()"
+  # TODO - setup wired-wireless networking
 }
 
 function setupFirewall(){
@@ -502,7 +501,7 @@ function setupArch(){
   printf -- "-- Installing packages on new system - %s\n" "$cmd" | tee -a "$outlog"
   if ! $cmd 1>>"$outlog" 2>>"$errlog"; then
     printf "[-] Installing packages failed\n"
-    exit 1
+    cleanup
   fi
 
   # - Do some configuration in the new system
@@ -576,7 +575,7 @@ EOF
 function checkVariables(){
   # -- mountpoint
   if [ ! -e "$mountpoint" ]; then
-    printf "[-] mountpoint '%s' doesn't exist\n" "$mountpoint" && exit 1
+    printf "[-] mountpoint '%s' doesn't exist\n" "$mountpoint" && cleanup
   fi
 
   if df --output=source | grep -Eq "^$mountpoint$"; then
@@ -591,7 +590,7 @@ function checkVariables(){
 
     case "${firewall,,}" in 
       "nftables" | "iptables" ) packagesToInstall="$packagesToInstall $firewall" ;;
-      * ) printf "[-] Firewall '%s' is not among valid options - [iptables,nftables]\n" "$firewall" && exit 1 ;;
+      * ) printf "[-] Firewall '%s' is not among valid options - [iptables,nftables]\n" "$firewall" && cleanup ;;
     esac
   fi
 
@@ -610,7 +609,7 @@ function checkVariables(){
   done
 
   if [ $exist == false ]; then
-    printf "[-] Kernel '%s' is not among valid options - [%s]\n" "$kernel" "$supportedKernels" && exit 1
+    printf "[-] Kernel '%s' is not among valid options - [%s]\n" "$kernel" "$supportedKernels" && cleanup
   else
     packagesToInstall="$kernel $packagesToInstall"
   fi
@@ -619,16 +618,16 @@ function checkVariables(){
   [ -z "$disk" ] && __chooseDiskFromMenu
 
   if ! lsblk "$disk" &>/dev/null; then 
-    printf "[-] Path '%s' is not a block device\n" "$disk" && exit 1
+    printf "[-] Path '%s' is not a block device\n" "$disk" && cleanup
   fi
 
   case "${partitionLayout,,}" in
     basic | advanced ) ;;
-    * ) printf "[-] Invalid partition layout\nbasic: / boot swap (3 partitions)\nadvanced: / /home boot swap (4 partitions)\n" && exit 0
+    * ) printf "[-] Invalid partition layout\nbasic: / boot swap (3 partitions)\nadvanced: / /home boot swap (4 partitions)\n" && cleanup
   esac
 
-  (( swapSize <= 0 )) && printf "[-] swap size '-%s Kb' must be a positive integer\n" "$swapSize" && exit 1
-  (( bootSize <= 0 )) && printf "[-] boot size '-%s Kb' must be a positive integer > 0\n" "$bootSize" && exit 1 
+  (( swapSize <= 0 )) && printf "[-] swap size '-%s Kb' must be a positive integer\n" "$swapSize" && cleanup
+  (( bootSize <= 0 )) && printf "[-] boot size '-%s Kb' must be a positive integer > 0\n" "$bootSize" && cleanup 
 
   # -- osprober
   if [ $enableOsprober == true ]; then
@@ -642,15 +641,15 @@ function loadJson(){
     read -rp "[+] Need to install 'jq' in order to use -j | --json, proceed? y/n " ans
     if [[ "${ans,,}" == "y" || "${ans,,}" = "yes" ]]; then
       pacman -Sy &>/dev/null
-      pacman -S --noconfirm jq &>/dev/null || { printf "[+] Couldn't install, ensure proper permissions or install it yourself 'pacman -S --noconfirm jq'\n"; exit 0; }
+      pacman -S --noconfirm jq &>/dev/null || { printf "[+] Couldn't install, ensure proper permissions or install it yourself 'pacman -S --noconfirm jq'\n"; cleanup; }
     else
-      exit 0
+      cleanup
     fi
   fi
 
   local config="$1"
 
-  [ -e "$config" ] || { printf "[+] Config '%s' doesn't exist\n" "$config" ; exit 1; }
+  [ -e "$config" ] || { printf "[+] Config '%s' doesn't exist\n" "$config" ; cleanup; }
 
   local json
   json=$(cat "$config")
@@ -709,7 +708,7 @@ function parseArgs(){
  for (( i = 0 ; i < $argc ; ++i )); do
   opt="${args[i],,}"
   if   [[ "$opt" == "-h" || "$opt" == "--help" ]]; then
-    usage && exit 0
+    usage && cleanup
   elif [[ "$opt" == "-v" || "$opt" == "--verbose" ]]; then
     verbose=true
   elif [[ "$opt" == "-d" || "$opt" == "--disk" ]]; then
@@ -777,7 +776,7 @@ function main(){
 
   # Set up the new system basic config + bootloader
   setupArch
-  exit 0
+  cleanup
 }
 
 # - Functions
