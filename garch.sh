@@ -424,7 +424,7 @@ function setupFirewall(){
 
   if [ "${firewall,,}" == "iptables" ]; then
     # Setup iptables  
-cat << EOF > "$mountpoint/etc/iptables.rules"
+cat << EOF > "$mountpoint/etc/iptables/iptables.rules"
 *filter
 :INPUT DROP [0:0]
 :FORWARD DROP [0:0]
@@ -489,6 +489,36 @@ EOF
   arch-chroot "$mountpoint" /bin/bash -c "systemctl enable $firewall"
 }
 
+function setupPostInstallOneshotService(){
+  # Set script
+  local scriptPath="$mountpoint/garch_post_install.sh"
+  cat << EOF > "$scriptPath"
+#!/bin/bash
+# Garch post-installation script
+
+# Set timezone
+timedatectl set-timezone "$timezone"
+EOF
+  # Give script execute permissions
+  arch-chroot "$mountpoint" /bin/bash -c "chmod +x /garch_post_install.sh"
+  # Set service
+  cat << EOF > "$mountpoint/etc/systemd/system/garch_post_install.service"
+[Unit]
+Description=Garch post installation script
+
+[Service]
+Type=oneshot
+ExecStart=/garch_post_install.sh
+ExecStartPost=/bin/bash -c "rm /etc/systemd/system/garch_post_install.service; rm /garch_post_install.sh; systemctl daemon-reload"
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # Enable service so that it executes on the next boot
+  arch-chroot "$mountpoint" /bin/bash -c "systemctl enable garch_post_install"
+}
+
 function setupArch(){
   # dosfstools: mkfs.vfat -F 32
   # efibootmgr: manage efi boot entries
@@ -525,9 +555,6 @@ echo "KEYMAP=$kblayout" > /etc/vconsole.conf
 sed -i "s/^#$locale/$locale/" /etc/locale.gen
 locale-gen
 
-# Set timezone
-# timedatectl set-timezone "$timezone"
-
 # Create sudoer
 useradd -m "$user" -s "$shell"
 
@@ -555,10 +582,13 @@ EOF
 
   setupFirewall # Will inmediatly return if $enableFirewall == false
   setupGraphicalEnvironment
+  setupPostInstallOneshotService
   # TODO - function setupNvidia()
 
   # Umount the disk and turn swap off
   for partition in "$homePath" "$bootPath" "$rootPath"; do
+    printf "umounting %s after installation\n" "$partition"
+    [ -z "$partition" ] && continue
     if [ -d "$partition" ]; then 
       umount "$partition" 1>>"$outlog" 2>>"$errlog" || __fail_umount "$partition"
     fi
